@@ -1,25 +1,30 @@
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Dict
+from pydantic import BaseModel
+import json
 
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # puedes restringir luego a tus dominios reales
-    allow_credentials=True,
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Diccionario para almacenar dispositivos conectados {device_id: websocket}
-devices: Dict[str, WebSocket] = {}
+# Diccionario de websockets conectados
+devices = {}
+
+class Command(BaseModel):
+    method: str
+    endpoint: str
+    body: dict | None = None
 
 @app.websocket("/ws/{device_id}")
 async def device_ws(websocket: WebSocket, device_id: str):
     await websocket.accept()
     devices[device_id] = websocket
-    print(f"Dispositivo conectado: {device_id}")
+    print(f"{device_id} conectado.")
     try:
         while True:
             data = await websocket.receive_text()
@@ -27,15 +32,12 @@ async def device_ws(websocket: WebSocket, device_id: str):
     except Exception as e:
         print(f"Conexión cerrada {device_id}: {e}")
     finally:
-        if device_id in devices:
-            del devices[device_id]
-            print(f"Dispositivo desconectado: {device_id}")
+        devices.pop(device_id, None)
 
-@app.get("/send/{device_id}/{message}")
-async def send_to_device(device_id: str, message: str):
-    websocket = devices.get(device_id)
-    if websocket:
-        await websocket.send_text(message)
-        print(f"Enviado a {device_id}: {message}")
-        return {"status": "ok"}
-    return {"status": "device not connected"}
+@app.post("/send/{device_id}")
+async def send_command(device_id: str, cmd: Command):
+    if device_id not in devices:
+        return {"status": "device not connected"}
+    
+    await devices[device_id].send_text(json.dumps(cmd.dict()))
+    return {"status": "ok"}
