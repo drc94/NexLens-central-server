@@ -31,7 +31,27 @@ def log_message(source: str, message: str):
     print(f"[{timestamp}] {source}: {message}")
 
 # -----------------------------
-# WebSocket para dispositivos (Raspberry Pi)
+# WebSocket para viewers (navegadores) - DEBE IR PRIMERO
+# -----------------------------
+@app.websocket("/ws/viewer")
+async def viewer_ws(websocket: WebSocket):
+    await websocket.accept()
+    viewer_id = f"viewer_{id(websocket)}"
+    viewers[viewer_id] = websocket
+    log_message("VIEWER", f"Viewer {viewer_id} conectado. Total viewers: {len(viewers)}")
+    
+    try:
+        while True:
+            data = await websocket.receive_text()
+            log_message(f"VIEWER_{viewer_id}", f"Mensaje: {data}")
+    except Exception as e:
+        log_message(f"VIEWER_{viewer_id}", f"Conexión cerrada: {e}")
+    finally:
+        viewers.pop(viewer_id, None)
+        log_message("VIEWER", f"Viewer {viewer_id} desconectado. Total: {len(viewers)}")
+
+# -----------------------------
+# WebSocket para dispositivos (Raspberry Pi) - DEBE IR DESPUÉS
 # -----------------------------
 @app.websocket("/ws/{device_id}")
 async def device_ws(websocket: WebSocket, device_id: str):
@@ -64,26 +84,6 @@ async def device_ws(websocket: WebSocket, device_id: str):
     finally:
         devices.pop(device_id, None)
         log_message("DEVICE", f"Dispositivo {device_id} desconectado. Total: {len(devices)}")
-
-# -----------------------------
-# WebSocket para viewers (navegadores)
-# -----------------------------
-@app.websocket("/ws/viewer")
-async def viewer_ws(websocket: WebSocket):
-    await websocket.accept()
-    viewer_id = f"viewer_{id(websocket)}"
-    viewers[viewer_id] = websocket
-    log_message("VIEWER", f"Viewer {viewer_id} conectado. Total viewers: {len(viewers)}")
-    
-    try:
-        while True:
-            data = await websocket.receive_text()
-            log_message(f"VIEWER_{viewer_id}", f"Mensaje: {data}")
-    except Exception as e:
-        log_message(f"VIEWER_{viewer_id}", f"Conexión cerrada: {e}")
-    finally:
-        viewers.pop(viewer_id, None)
-        log_message("VIEWER", f"Viewer {viewer_id} desconectado. Total: {len(viewers)}")
 
 # -----------------------------
 # Función para broadcast a todos los viewers
@@ -185,22 +185,39 @@ async def test_broadcast():
     test_message = {
         "type": "test_frame",
         "device_id": "test_server",
-        "data": "test_data",
+        "data": "test_data_12345",
         "timestamp": datetime.now().isoformat(),
         "frame_number": 999
     }
     
     await broadcast_to_viewers(test_message)
-    return {"status": "test message sent", "viewers_count": len(viewers)}
+    return {
+        "status": "test message sent", 
+        "viewers_count": len(viewers),
+        "message": test_message
+    }
+
+@app.get("/debug")
+async def debug():
+    """Endpoint de debug completo"""
+    return {
+        "devices": list(devices.keys()),
+        "viewers_count": len(viewers),
+        "viewer_ids": list(viewers.keys()),
+        "server_time": datetime.now().isoformat()
+    }
 
 @app.get("/")
 async def root():
     return {
         "message": "Servidor de video WebRTC funcionando",
-        "status_endpoint": "/status",
-        "test_broadcast_endpoint": "/test_broadcast",
-        "websocket_device": "/ws/{device_id}",
-        "websocket_viewer": "/ws/viewer"
+        "endpoints": {
+            "status": "/status",
+            "debug": "/debug", 
+            "test_broadcast": "/test_broadcast",
+            "websocket_viewer": "/ws/viewer",
+            "websocket_device": "/ws/{device_id}"
+        }
     }
 
 if __name__ == "__main__":
