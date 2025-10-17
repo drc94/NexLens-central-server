@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import json
 import asyncio
+from datetime import datetime
 
 app = FastAPI()
 
@@ -24,6 +25,11 @@ class Command(BaseModel):
     endpoint: str
     body: dict | None = None
 
+def log_message(source: str, message: str):
+    """Función de logging consistente"""
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    print(f"[{timestamp}] {source}: {message}")
+
 # -----------------------------
 # WebSocket para dispositivos (Raspberry Pi)
 # -----------------------------
@@ -31,25 +37,33 @@ class Command(BaseModel):
 async def device_ws(websocket: WebSocket, device_id: str):
     await websocket.accept()
     devices[device_id] = websocket
-    print(f"Dispositivo {device_id} conectado.")
+    log_message("DEVICE", f"Dispositivo {device_id} conectado. Total dispositivos: {len(devices)}")
     
     try:
         while True:
             data = await websocket.receive_text()
-            print(f"Recibido de {device_id}: {data[:100]}...")  # Log solo primeros 100 chars
+            log_message(f"DEVICE_{device_id}", f"Mensaje recibido ({len(data)} chars)")
             
             # Reenviar frames a todos los viewers
             try:
                 message_data = json.loads(data)
-                if message_data.get("type") == "video_frame":
+                message_type = message_data.get("type", "unknown")
+                
+                if message_type == "video_frame":
+                    frame_num = message_data.get("frame_number", "N/A")
+                    log_message("BROADCAST", f"Frame {frame_num} -> {len(viewers)} viewers")
                     await broadcast_to_viewers(message_data)
-            except json.JSONDecodeError:
-                print(f"Mensaje no JSON de {device_id}")
+                else:
+                    log_message(f"DEVICE_{device_id}", f"Tipo: {message_type}")
+                    
+            except json.JSONDecodeError as e:
+                log_message(f"DEVICE_{device_id}", f"Error JSON: {e}")
                 
     except Exception as e:
-        print(f"Conexión cerrada {device_id}: {e}")
+        log_message(f"DEVICE_{device_id}", f"Conexión cerrada: {e}")
     finally:
         devices.pop(device_id, None)
+        log_message("DEVICE", f"Dispositivo {device_id} desconectado. Total: {len(devices)}")
 
 # -----------------------------
 # WebSocket para viewers (navegadores)
@@ -59,36 +73,43 @@ async def viewer_ws(websocket: WebSocket):
     await websocket.accept()
     viewer_id = f"viewer_{id(websocket)}"
     viewers[viewer_id] = websocket
-    print(f"Viewer {viewer_id} conectado.")
+    log_message("VIEWER", f"Viewer {viewer_id} conectado. Total viewers: {len(viewers)}")
     
     try:
         while True:
-            # Los viewers pueden enviar mensajes de control si es necesario
             data = await websocket.receive_text()
-            print(f"Recibido de viewer {viewer_id}: {data}")
+            log_message(f"VIEWER_{viewer_id}", f"Mensaje: {data}")
     except Exception as e:
-        print(f"Conexión cerrada viewer {viewer_id}: {e}")
+        log_message(f"VIEWER_{viewer_id}", f"Conexión cerrada: {e}")
     finally:
         viewers.pop(viewer_id, None)
+        log_message("VIEWER", f"Viewer {viewer_id} desconectado. Total: {len(viewers)}")
 
 # -----------------------------
 # Función para broadcast a todos los viewers
 # -----------------------------
 async def broadcast_to_viewers(message: dict):
     if not viewers:
+        log_message("BROADCAST", "No hay viewers conectados")
         return
         
     disconnected = []
+    success_count = 0
+    
     for viewer_id, websocket in viewers.items():
         try:
             await websocket.send_text(json.dumps(message))
+            success_count += 1
         except Exception as e:
-            print(f"Error enviando a viewer {viewer_id}: {e}")
+            log_message("BROADCAST", f"Error enviando a {viewer_id}: {e}")
             disconnected.append(viewer_id)
     
     # Limpiar viewers desconectados
     for viewer_id in disconnected:
         viewers.pop(viewer_id, None)
+    
+    if success_count > 0:
+        log_message("BROADCAST", f"✅ Enviado a {success_count} viewers")
 
 # -----------------------------
 # Enviar comandos HTTP / WebRTC
@@ -138,7 +159,7 @@ async def receive_answer(sdp: SDP):
             "endpoint": "",
             "body": {"sdp": sdp.sdp, "device_id": sdp.device_id}
         }))
-        print(f"[Render] Answer enviada a {sdp.device_id}")
+        log_message("WEBRTC", f"Answer enviada a {sdp.device_id}")
 
     return {"status": "ok"}
 
@@ -147,28 +168,39 @@ async def get_answer(device_id: str):
     return {"sdp": answers.get(device_id)}
 
 # -----------------------------
-# Endpoints de estado
+# Endpoints de estado y diagnóstico
 # -----------------------------
 @app.get("/status")
 async def get_status():
     return {
         "devices_connected": list(devices.keys()),
         "viewers_connected": len(viewers),
-        "total_connections": len(devices) + len(viewers)
+        "total_connections": len(devices) + len(viewers),
+        "server_time": datetime.now().isoformat()
     }
+
+@app.get("/test_broadcast")
+async def test_broadcast():
+    """Endpoint para testear el broadcast manualmente"""
+    test_message = {
+        "type": "test_frame",
+        "device_id": "test_server",
+        "data": "test_data",
+        "timestamp": datetime.now().isoformat(),
+        "frame_number": 999
+    }
+    
+    await broadcast_to_viewers(test_message)
+    return {"status": "test message sent", "viewers_count": len(viewers)}
 
 @app.get("/")
 async def root():
     return {
         "message": "Servidor de video WebRTC funcionando",
-        "endpoints": {
-            "websocket_device": "/ws/{device_id}",
-            "websocket_viewer": "/ws/viewer", 
-            "status": "/status",
-            "send_command": "/send/{device_id}",
-            "webrtc_offer": "/offer",
-            "webrtc_answer": "/answer"
-        }
+        "status_endpoint": "/status",
+        "test_broadcast_endpoint": "/test_broadcast",
+        "websocket_device": "/ws/{device_id}",
+        "websocket_viewer": "/ws/viewer"
     }
 
 if __name__ == "__main__":
