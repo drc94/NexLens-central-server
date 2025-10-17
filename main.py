@@ -41,3 +41,29 @@ async def send_command(device_id: str, cmd: Command):
     
     await devices[device_id].send_text(json.dumps(cmd.dict()))
     return {"status": "ok"}
+
+# Diccionario temporal de señalización
+offers = {}
+answers = {}
+
+class SDP(BaseModel):
+    sdp: str
+    device_id: str
+
+@app.post("/offer")
+async def receive_offer(sdp: SDP):
+    offers[sdp.device_id] = sdp.sdp
+    return {"status": "ok"}
+
+@app.post("/answer")
+async def receive_answer(sdp: SDP):
+    answers[sdp.device_id] = sdp.sdp
+    return {"status": "ok"}
+
+@app.get("/offer/{device_id}")
+async def get_offer(device_id: str):
+    return {"sdp": offers.get(device_id)}
+
+@app.get("/answer/{device_id}")
+async def get_answer(device_id: str):
+    return {"sdp": answers.get(device_id)}
