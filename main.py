@@ -12,7 +12,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# -----------------------------
 # Diccionario de websockets conectados
+# -----------------------------
 devices = {}
 
 class Command(BaseModel):
@@ -34,6 +36,9 @@ async def device_ws(websocket: WebSocket, device_id: str):
     finally:
         devices.pop(device_id, None)
 
+# -----------------------------
+# Enviar comandos HTTP / WebRTC
+# -----------------------------
 @app.post("/send/{device_id}")
 async def send_command(device_id: str, cmd: Command):
     if device_id not in devices:
@@ -42,7 +47,9 @@ async def send_command(device_id: str, cmd: Command):
     await devices[device_id].send_text(json.dumps(cmd.dict()))
     return {"status": "ok"}
 
-# Diccionario temporal de señalización
+# -----------------------------
+# Diccionarios para ofertas/respuestas
+# -----------------------------
 offers = {}
 answers = {}
 
@@ -50,20 +57,37 @@ class SDP(BaseModel):
     sdp: str
     device_id: str
 
-@app.post("/offer")
+# -----------------------------
+# Recibir offer de la Raspberry
+# -----------------------------
+@app.post("/answer")
 async def receive_offer(sdp: SDP):
     offers[sdp.device_id] = sdp.sdp
     return {"status": "ok"}
 
-@app.post("/answer")
-async def receive_answer(sdp: SDP):
-    answers[sdp.device_id] = sdp.sdp
-    return {"status": "ok"}
-
-@app.get("/offer/{device_id}")
+@app.get("/answer/{device_id}")
 async def get_offer(device_id: str):
     return {"sdp": offers.get(device_id)}
 
-@app.get("/answer/{device_id}")
+# -----------------------------
+# Recibir answer del navegador y enviarlo al dispositivo
+# -----------------------------
+@app.post("/offer")
+async def receive_answer(sdp: SDP):
+    answers[sdp.device_id] = sdp.sdp
+
+    # Enviar answer al dispositivo vía WebSocket
+    ws = devices.get(sdp.device_id)
+    if ws:
+        await ws.send_text(json.dumps({
+            "method": "WEBRTC_ANSWER",
+            "endpoint": "",
+            "body": {"sdp": sdp.sdp, "device_id": sdp.device_id}
+        }))
+        print(f"[Render] Answer enviada a {sdp.device_id}")
+
+    return {"status": "ok"}
+
+@app.get("/offer/{device_id}")
 async def get_answer(device_id: str):
     return {"sdp": answers.get(device_id)}
