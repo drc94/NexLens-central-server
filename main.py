@@ -1,15 +1,9 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 import json
 import asyncio
 from datetime import datetime
-import aiohttp
-from typing import Dict, Any, Optional
 import logging
-import hashlib
-import hmac
-import secrets
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -23,30 +17,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -----------------------------
 # Almacenamiento de conexiones
-# -----------------------------
-webrtc_connections = {}  # Solo para signaling WebRTC (no datos)
-proxy_connections = {}   # Para configuración y descargas
+webrtc_connections = {}
+proxy_connections = {}
 
-class ProxyRequest(BaseModel):
-    method: str
-    endpoint: str
-    body: Dict[str, Any] = None
-    headers: Dict[str, str] = None
-
-# Clave secreta para firmar URLs
-URL_SECRET = "tu_clave_secreta_nexlens_2024"
-
-# -----------------------------
-# WebRTC Signaling (SOLO señalización)
-# -----------------------------
 @app.websocket("/ws/webrtc/{client_id}")
 async def webrtc_websocket(websocket: WebSocket, client_id: str):
-    """WebSocket solo para señalización WebRTC - NO para datos de video"""
     await websocket.accept()
     webrtc_connections[client_id] = websocket
-    logger.info(f"WebRTC Signaling: {client_id} conectado. Total: {len(webrtc_connections)}")
+    logger.info(f"WebRTC Signaling: {client_id} conectado")
     
     try:
         while True:
@@ -54,42 +33,30 @@ async def webrtc_websocket(websocket: WebSocket, client_id: str):
             message = json.loads(data)
             message_type = message.get("type")
             
-            # SOLO reenviar mensajes de señalización WebRTC
+            # Reenviar mensajes de señalización
             target_id = message.get("target")
             if target_id and target_id in webrtc_connections:
                 await webrtc_connections[target_id].send_text(json.dumps({
                     **message,
                     "sender": client_id
                 }))
-                logger.debug(f"WebRTC: Mensaje {message_type} de {client_id} a {target_id}")
+                logger.debug(f"WebRTC: {message_type} de {client_id} a {target_id}")
                 
     except WebSocketDisconnect:
-        logger.info(f"WebRTC Signaling: {client_id} desconectado")
-    except Exception as e:
-        logger.error(f"WebRTC Error {client_id}: {e}")
+        logger.info(f"WebRTC: {client_id} desconectado")
     finally:
         webrtc_connections.pop(client_id, None)
 
-# -----------------------------
-# WebSocket Proxy para Configuración y Descargas
-# -----------------------------
 @app.websocket("/ws/proxy/{device_id}")
 async def proxy_websocket(websocket: WebSocket, device_id: str):
-    """WebSocket para configuración, thumbnails y descargas (NO video)"""
     await websocket.accept()
     
-    # Guardar conexión proxy
     proxy_id = f"proxy_{id(websocket)}"
-    proxy_connections[proxy_id] = {
-        "websocket": websocket,
-        "device_id": device_id
-    }
-    
-    logger.info(f"Proxy WS: {proxy_id} conectado para dispositivo {device_id}")
+    proxy_connections[proxy_id] = {"websocket": websocket, "device_id": device_id}
+    logger.info(f"Proxy: {proxy_id} para {device_id}")
     
     try:
         while True:
-            # Recibir petición del cliente
             data = await websocket.receive_text()
             request_data = json.loads(data)
             
@@ -98,11 +65,9 @@ async def proxy_websocket(websocket: WebSocket, device_id: str):
             body = request_data.get("body")
             headers = request_data.get("headers", {})
             
-            logger.info(f"Proxy WS: {method} {endpoint} para {device_id}")
+            logger.info(f"Proxy: {method} {endpoint}")
             
-            # Reenviar petición al dispositivo via WebRTC
             if device_id in webrtc_connections:
-                # Crear mensaje de petición proxy
                 proxy_message = {
                     "type": "proxy_request",
                     "method": method,
@@ -113,169 +78,64 @@ async def proxy_websocket(websocket: WebSocket, device_id: str):
                     "target": device_id
                 }
                 
-                # Enviar al dispositivo
                 await webrtc_connections[device_id].send_text(json.dumps(proxy_message))
-                logger.info(f"Proxy WS: Petición enviada a {device_id}")
                 
             else:
-                # Dispositivo no conectado
-                error_response = {
+                await websocket.send_text(json.dumps({
                     "status_code": 503,
-                    "content": "Dispositivo no conectado",
-                    "headers": {}
-                }
-                await websocket.send_text(json.dumps(error_response))
-                logger.warning(f"Proxy WS: Dispositivo {device_id} no conectado")
+                    "content": "Dispositivo no conectado"
+                }))
                 
     except WebSocketDisconnect:
-        logger.info(f"Proxy WS: {proxy_id} desconectado")
-    except Exception as e:
-        logger.error(f"Proxy WS Error {proxy_id}: {e}")
-        try:
-            error_response = {
-                "status_code": 500,
-                "content": f"Error interno: {str(e)}",
-                "headers": {}
-            }
-            await websocket.send_text(json.dumps(error_response))
-        except:
-            pass
+        logger.info(f"Proxy: {proxy_id} desconectado")
     finally:
         proxy_connections.pop(proxy_id, None)
 
-# -----------------------------
-# Manejar respuestas proxy desde dispositivos
-# -----------------------------
 async def handle_proxy_response(response_data: dict):
-    """Manejar respuesta de petición proxy desde un dispositivo"""
     proxy_id = response_data.get("proxy_id")
-    
     if proxy_id in proxy_connections:
         try:
-            # Enviar respuesta al cliente proxy
             await proxy_connections[proxy_id]["websocket"].send_text(json.dumps({
                 "status_code": response_data.get("status_code", 200),
                 "content": response_data.get("content", ""),
                 "headers": response_data.get("headers", {})
             }))
-            logger.info(f"Proxy Response: {response_data.get('status_code')} para {proxy_id}")
-            
         except Exception as e:
-            logger.error(f"Error enviando respuesta proxy: {e}")
-    else:
-        logger.warning(f"Proxy ID no encontrado: {proxy_id}")
+            logger.error(f"Error proxy response: {e}")
 
-# -----------------------------
-# Proxy HTTP para Thumbnails (Alternativa más simple)
-# -----------------------------
 @app.get("/proxy-thumbnail/{device_id}")
 async def proxy_thumbnail(device_id: str, path: str):
-    """Proxy HTTP para thumbnails - Más simple y confiable"""
     if device_id not in webrtc_connections:
         raise HTTPException(status_code=404, detail="Dispositivo no conectado")
     
     try:
-        # Usar aiohttp para hacer la petición
-        import aiohttp
+        import websockets
         from fastapi.responses import Response
         
-        async with aiohttp.ClientSession() as session:
-            # Crear URL completa al servidor Flask local (a través del proxy)
-            # Enviar solicitud via WebSocket proxy
-            proxy_id = f"thumb_{secrets.token_urlsafe(8)}"
+        async with websockets.connect(f"wss://nexlens-central-server.onrender.com/ws/proxy/{device_id}") as ws:
+            await ws.send(json.dumps({
+                "method": "GET",
+                "endpoint": path,
+                "headers": {"Accept": "image/*"}
+            }))
             
-            # Crear promise para la respuesta
-            response_received = asyncio.Event()
-            thumbnail_response = {}
+            response = await ws.recv()
+            response_data = json.loads(response)
             
-            # Handler temporal para capturar la respuesta
-            original_receive = None
+            if response_data.get("status_code") != 200:
+                raise HTTPException(status_code=404)
             
-            async def wait_for_thumbnail():
-                # Crear WebSocket proxy temporal
-                proxy_ws = await aiohttp.ClientSession().ws_connect(
-                    f"wss://nexlens-central-server.onrender.com/ws/proxy/{device_id}"
-                )
-                
-                try:
-                    # Enviar solicitud
-                    await proxy_ws.send_str(json.dumps({
-                        "method": "GET",
-                        "endpoint": path,
-                        "headers": {"Accept": "image/*"}
-                    }))
-                    
-                    # Recibir respuesta
-                    response = await proxy_ws.receive_str()
-                    thumbnail_response.update(json.loads(response))
-                    response_received.set()
-                    
-                finally:
-                    await proxy_ws.close()
-            
-            # Ejecutar en segundo plano
-            asyncio.create_task(wait_for_thumbnail())
-            
-            # Esperar respuesta
-            try:
-                await asyncio.wait_for(response_received.wait(), timeout=10.0)
-            except asyncio.TimeoutError:
-                raise HTTPException(status_code=504, detail="Timeout")
-            
-            if thumbnail_response.get('status_code') != 200:
-                raise HTTPException(status_code=404, detail="Thumbnail no encontrado")
-            
-            content = thumbnail_response.get('content', '')
-            headers = thumbnail_response.get('headers', {})
-            content_type = headers.get('content-type', 'image/gif')
-            
-            return Response(content=content, media_type=content_type)
+            content_type = response_data.get("headers", {}).get("content-type", "image/gif")
+            return Response(content=response_data.get("content", ""), media_type=content_type)
             
     except Exception as e:
-        logger.error(f"Error en proxy thumbnail: {e}")
-        # Devolver placeholder
-        placeholder_svg = '''
-        <svg width="200" height="120" viewBox="0 0 200 120" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <rect width="200" height="120" fill="#F3F4F6"/>
-            <text x="100" y="60" font-family="Arial" font-size="14" fill="#999" text-anchor="middle">Thumbnail</text>
-        </svg>
-        '''
+        logger.error(f"Error thumbnail: {e}")
+        placeholder_svg = '<svg width="200" height="120"><rect width="200" height="120" fill="#F3F4F6"/><text x="100" y="60" font-family="Arial" font-size="14" fill="#999" text-anchor="middle">Thumbnail</text></svg>'
         return Response(content=placeholder_svg, media_type="image/svg+xml")
-
-# -----------------------------
-# Endpoints de gestión
-# -----------------------------
-@app.get("/devices")
-async def list_devices():
-    """Listar dispositivos conectados"""
-    connected_devices = list(webrtc_connections.keys())
-    return {
-        "connected_devices": connected_devices,
-        "total_connected": len(connected_devices)
-    }
-
-@app.get("/status")
-async def get_status():
-    return {
-        "webrtc_connections": list(webrtc_connections.keys()),
-        "proxy_connections": len(proxy_connections),
-        "total_connections": len(webrtc_connections) + len(proxy_connections),
-        "server_time": datetime.now().isoformat()
-    }
 
 @app.get("/")
 async def root():
-    return {
-        "message": "Servidor WebRTC Signaling + WebSocket Proxy funcionando",
-        "endpoints": {
-            "webrtc_signaling": "/ws/webrtc/{client_id}",
-            "websocket_proxy": "/ws/proxy/{device_id}",
-            "status": "/status",
-            "devices": "/devices",
-            "thumbnail_proxy": "/proxy-thumbnail/{device_id}?path=/thumbnails/filename.gif"
-        },
-        "note": "WebRTC es solo para señalización. El video va directo P2P."
-    }
+    return {"message": "WebRTC Signaling Server"}
 
 if __name__ == "__main__":
     import uvicorn
