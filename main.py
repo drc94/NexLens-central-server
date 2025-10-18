@@ -7,6 +7,9 @@ from datetime import datetime
 import aiohttp
 from typing import Dict, Any
 import logging
+import hashlib
+import hmac
+import secrets
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -25,12 +28,16 @@ app.add_middleware(
 # -----------------------------
 webrtc_connections = {}
 proxy_connections = {}
+download_connections = {}
 
 class ProxyRequest(BaseModel):
     method: str
     endpoint: str
     body: Dict[str, Any] = None
     headers: Dict[str, str] = None
+
+# Clave secreta para firmar URLs (guarda en environment variables en Render)
+URL_SECRET = "tu_clave_secreta_nexlens_2024"
 
 # -----------------------------
 # WebRTC Signaling
@@ -58,6 +65,10 @@ async def webrtc_websocket(websocket: WebSocket, client_id: str):
             # Manejar respuestas proxy desde dispositivos
             if message_type == "proxy_response":
                 await handle_proxy_response(message)
+                
+            # Manejar respuestas de descarga
+            if message_type == "file_chunk":
+                await handle_file_chunk(message)
                 
     except WebSocketDisconnect:
         logger.info(f"WebRTC: {client_id} desconectado")
@@ -109,7 +120,7 @@ async def proxy_websocket(websocket: WebSocket, device_id: str):
                     "target": device_id
                 }
                 
-                # Enviar al dispositivo - USAR send() en lugar de send_text()
+                # Enviar al dispositivo
                 await webrtc_connections[device_id].send_text(json.dumps(proxy_message))
                 logger.info(f"Proxy WS: Petición enviada a {device_id}")
                 
@@ -140,6 +151,67 @@ async def proxy_websocket(websocket: WebSocket, device_id: str):
         proxy_connections.pop(proxy_id, None)
 
 # -----------------------------
+# WebSocket para Descargas
+# -----------------------------
+@app.websocket("/ws/download/{device_id}")
+async def download_websocket(websocket: WebSocket, device_id: str):
+    """WebSocket dedicado para transferencia de archivos grandes"""
+    await websocket.accept()
+    
+    download_id = f"download_{id(websocket)}"
+    download_connections[download_id] = {
+        "websocket": websocket,
+        "device_id": device_id
+    }
+    
+    logger.info(f"Download WS: {download_id} conectado para {device_id}")
+    
+    try:
+        while True:
+            # El cliente solicita un archivo
+            data = await websocket.receive_text()
+            request = json.loads(data)
+            
+            if request["type"] == "download_request":
+                filename = request["filename"]
+                chunk_size = request.get("chunk_size", 64 * 1024)  # 64KB por defecto
+                
+                # Reenviar solicitud al dispositivo via WebRTC
+                if device_id in webrtc_connections:
+                    download_request_id = secrets.token_urlsafe(16)
+                    
+                    # Enviar solicitud de descarga al dispositivo
+                    await webrtc_connections[device_id].send_text(json.dumps({
+                        "type": "file_download",
+                        "filename": filename,
+                        "download_id": download_request_id,
+                        "client_download_id": download_id,
+                        "chunk_size": chunk_size
+                    }))
+                    
+                    logger.info(f"Download WS: Solicitud de descarga enviada para {filename}")
+                    
+                else:
+                    await websocket.send_text(json.dumps({
+                        "type": "download_error",
+                        "error": "Dispositivo no conectado"
+                    }))
+                    
+    except WebSocketDisconnect:
+        logger.info(f"Download WS: {download_id} desconectado")
+    except Exception as e:
+        logger.error(f"Download WS Error {download_id}: {e}")
+        try:
+            await websocket.send_text(json.dumps({
+                "type": "download_error",
+                "error": str(e)
+            }))
+        except:
+            pass
+    finally:
+        download_connections.pop(download_id, None)
+
+# -----------------------------
 # Manejar respuestas proxy desde dispositivos
 # -----------------------------
 async def handle_proxy_response(response_data: dict):
@@ -162,6 +234,29 @@ async def handle_proxy_response(response_data: dict):
         logger.warning(f"Proxy ID no encontrado: {proxy_id}")
 
 # -----------------------------
+# Manejar chunks de archivos desde dispositivos
+# -----------------------------
+async def handle_file_chunk(chunk_data: dict):
+    """Manejar chunk de archivo desde un dispositivo"""
+    client_download_id = chunk_data.get("client_download_id")
+    
+    if client_download_id in download_connections:
+        try:
+            # Enviar chunk al cliente de descarga
+            await download_connections[client_download_id]["websocket"].send_text(json.dumps({
+                "type": "file_chunk",
+                "chunk_index": chunk_data.get("chunk_index"),
+                "chunk_data": chunk_data.get("chunk_data"),
+                "total_chunks": chunk_data.get("total_chunks"),
+                "filename": chunk_data.get("filename")
+            }))
+            
+        except Exception as e:
+            logger.error(f"Error enviando chunk de archivo: {e}")
+    else:
+        logger.warning(f"Download ID no encontrado: {client_download_id}")
+
+# -----------------------------
 # Endpoints de gestión
 # -----------------------------
 @app.get("/devices")
@@ -178,8 +273,26 @@ async def get_status():
     return {
         "webrtc_connections": list(webrtc_connections.keys()),
         "proxy_connections": len(proxy_connections),
-        "total_connections": len(webrtc_connections) + len(proxy_connections),
+        "download_connections": len(download_connections),
+        "total_connections": len(webrtc_connections) + len(proxy_connections) + len(download_connections),
         "server_time": datetime.now().isoformat()
+    }
+
+@app.get("/proxy/signed-url/{device_id}")
+async def get_signed_url(device_id: str, filename: str, action: str = "download"):
+    """Generar URL firmada para acceso directo P2P"""
+    if device_id not in webrtc_connections:
+        raise HTTPException(status_code=404, detail="Dispositivo no conectado")
+    
+    # Crear token firmado con expiración
+    timestamp = str(int(datetime.now().timestamp()))
+    token_data = f"{device_id}:{filename}:{action}:{timestamp}"
+    signature = hmac.new(URL_SECRET.encode(), token_data.encode(), hashlib.sha256).hexdigest()
+    
+    return {
+        "signed_url": f"/proxy/direct/{device_id}/{filename}",
+        "token": f"{timestamp}:{signature}",
+        "expires_in": 300  # 5 minutos
     }
 
 @app.get("/")
@@ -188,9 +301,11 @@ async def root():
         "message": "Servidor WebRTC + WebSocket Proxy funcionando",
         "endpoints": {
             "webrtc_signaling": "/ws/webrtc/{client_id}",
-            "websocket_proxy": "/ws/proxy/{device_id}", 
+            "websocket_proxy": "/ws/proxy/{device_id}",
+            "websocket_download": "/ws/download/{device_id}",
             "status": "/status",
-            "devices": "/devices"
+            "devices": "/devices",
+            "signed_url": "/proxy/signed-url/{device_id}?filename=XXX&action=download"
         }
     }
 
