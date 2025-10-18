@@ -29,6 +29,7 @@ app.add_middleware(
 webrtc_connections = {}
 proxy_connections = {}
 download_connections = {}
+thumbnail_requests = {}
 
 class ProxyRequest(BaseModel):
     method: str
@@ -257,6 +258,93 @@ async def handle_file_chunk(chunk_data: dict):
         logger.warning(f"Download ID no encontrado: {client_download_id}")
 
 # -----------------------------
+# Proxy para Thumbnails
+# -----------------------------
+@app.get("/proxy-thumbnail/{device_id}")
+async def proxy_thumbnail(device_id: str, path: str):
+    """Proxy para thumbnails - Solución temporal"""
+    if device_id not in webrtc_connections:
+        raise HTTPException(status_code=404, detail="Dispositivo no conectado")
+    
+    # Crear ID único para esta solicitud
+    thumbnail_id = f"thumb_{secrets.token_urlsafe(8)}"
+    
+    # Crear evento para esperar la respuesta
+    response_event = asyncio.Event()
+    thumbnail_response = {}
+    
+    # Handler temporal para la respuesta
+    original_handlers = {}
+    
+    def create_response_handler(device_id, thumbnail_id, response_event, thumbnail_response):
+        async def response_handler(message):
+            try:
+                data = json.loads(message)
+                if (data.get('type') == 'proxy_response' and 
+                    data.get('proxy_id') == thumbnail_id):
+                    
+                    thumbnail_response['status_code'] = data.get('status_code', 200)
+                    thumbnail_response['content'] = data.get('content', '')
+                    thumbnail_response['headers'] = data.get('headers', {})
+                    response_event.set()
+                    
+            except Exception as e:
+                logger.error(f"Error en thumbnail handler: {e}")
+                response_event.set()
+        
+        return response_handler
+    
+    # Guardar handler original y configurar el nuevo
+    original_handler = webrtc_connections[device_id]._on_message
+    new_handler = create_response_handler(device_id, thumbnail_id, response_event, thumbnail_response)
+    webrtc_connections[device_id]._on_message = new_handler
+    
+    try:
+        # Enviar solicitud de thumbnail al dispositivo
+        await webrtc_connections[device_id].send_text(json.dumps({
+            "type": "proxy_request",
+            "method": "GET", 
+            "endpoint": path,
+            "proxy_id": thumbnail_id,
+            "target": device_id
+        }))
+        
+        logger.info(f"Thumbnail request enviada: {path} para {device_id}")
+        
+        # Esperar respuesta con timeout
+        try:
+            await asyncio.wait_for(response_event.wait(), timeout=10.0)
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout esperando thumbnail: {path}")
+            raise HTTPException(status_code=504, detail="Timeout esperando thumbnail")
+        
+        # Verificar respuesta
+        if thumbnail_response.get('status_code', 404) != 200:
+            raise HTTPException(status_code=404, detail="Thumbnail no encontrado en dispositivo")
+        
+        content = thumbnail_response.get('content', '')
+        headers = thumbnail_response.get('headers', {})
+        
+        # Determinar content-type
+        content_type = headers.get('content-type', 'image/gif')
+        if not content_type.startswith('image/'):
+            content_type = 'image/gif'
+        
+        from fastapi.responses import Response
+        return Response(
+            content=content,
+            media_type=content_type
+        )
+        
+    except Exception as e:
+        logger.error(f"Error en proxy thumbnail: {e}")
+        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
+    
+    finally:
+        # Restaurar handler original
+        webrtc_connections[device_id]._on_message = original_handler
+
+# -----------------------------
 # Endpoints de gestión
 # -----------------------------
 @app.get("/devices")
@@ -305,6 +393,7 @@ async def root():
             "websocket_download": "/ws/download/{device_id}",
             "status": "/status",
             "devices": "/devices",
+            "thumbnail_proxy": "/proxy-thumbnail/{device_id}?path=/thumbnails/filename.gif",
             "signed_url": "/proxy/signed-url/{device_id}?filename=XXX&action=download"
         }
     }
