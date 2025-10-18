@@ -24,7 +24,7 @@ app.add_middleware(
 # Almacenamiento de conexiones
 # -----------------------------
 webrtc_connections = {}
-proxy_connections = {}  # Para conexiones proxy WebSocket
+proxy_connections = {}
 
 class ProxyRequest(BaseModel):
     method: str
@@ -32,12 +32,8 @@ class ProxyRequest(BaseModel):
     body: Dict[str, Any] = None
     headers: Dict[str, str] = None
 
-class DeviceConfig(BaseModel):
-    device_id: str
-    local_base_url: str
-
 # -----------------------------
-# WebRTC Signaling (SIN CAMBIOS)
+# WebRTC Signaling
 # -----------------------------
 @app.websocket("/ws/webrtc/{client_id}")
 async def webrtc_websocket(websocket: WebSocket, client_id: str):
@@ -58,7 +54,10 @@ async def webrtc_websocket(websocket: WebSocket, client_id: str):
                     **message,
                     "sender": client_id
                 }))
-                logger.info(f"WebRTC: {message_type} de {client_id} -> {target_id}")
+                
+            # Manejar respuestas proxy desde dispositivos
+            if message_type == "proxy_response":
+                await handle_proxy_response(message)
                 
     except WebSocketDisconnect:
         logger.info(f"WebRTC: {client_id} desconectado")
@@ -106,11 +105,11 @@ async def proxy_websocket(websocket: WebSocket, device_id: str):
                     "endpoint": endpoint,
                     "body": body,
                     "headers": headers,
-                    "proxy_id": proxy_id,  # Para enviar la respuesta al proxy correcto
+                    "proxy_id": proxy_id,
                     "target": device_id
                 }
                 
-                # Enviar al dispositivo
+                # Enviar al dispositivo - USAR send() en lugar de send_text()
                 await webrtc_connections[device_id].send_text(json.dumps(proxy_message))
                 logger.info(f"Proxy WS: Petición enviada a {device_id}")
                 
@@ -143,7 +142,7 @@ async def proxy_websocket(websocket: WebSocket, device_id: str):
 # -----------------------------
 # Manejar respuestas proxy desde dispositivos
 # -----------------------------
-async def handle_proxy_response(device_id: str, response_data: dict):
+async def handle_proxy_response(response_data: dict):
     """Manejar respuesta de petición proxy desde un dispositivo"""
     proxy_id = response_data.get("proxy_id")
     
@@ -163,13 +162,8 @@ async def handle_proxy_response(device_id: str, response_data: dict):
         logger.warning(f"Proxy ID no encontrado: {proxy_id}")
 
 # -----------------------------
-# Endpoints de gestión (opcionales)
+# Endpoints de gestión
 # -----------------------------
-@app.post("/register-device")
-async def register_device(config: DeviceConfig):
-    """Endpoint para compatibilidad (no necesario para WebSocket proxy)"""
-    return {"status": "webSocket_proxy_no_requires_registration"}
-
 @app.get("/devices")
 async def list_devices():
     """Listar dispositivos conectados"""
