@@ -1,49 +1,79 @@
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
+from flask import Flask, render_template
+from flask_socketio import SocketIO
+import logging
+import os
 
-app = FastAPI()
+app = Flask(__name__)
+app.config['SECRET_KEY'] = 'tu_secret_key_aqui'
+socketio = SocketIO(app, cors_allowed_origins="*")
 
-# Permitir cualquier origen para desarrollo
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Almacén simple para sesiones P2P
+sessions = {}
 
-# Estado global de señalización
-SIGNALING_STATE = {
-    "offer": None,
-    "answer": None
-}
+@app.route('/')
+def index():
+    return render_template('index.html')
 
-# Cuando la Pi envía la oferta
-@app.post("/offer")
-async def post_offer(request: Request):
-    data = await request.json()
-    # Limpiar la respuesta anterior
-    SIGNALING_STATE["answer"] = None
-    SIGNALING_STATE["offer"] = data
-    return {"status": "ok"}
+@socketio.on('connect')
+def handle_connect():
+    print(f'Cliente conectado: {request.sid}')
 
-# Cuando el navegador obtiene la oferta
-@app.get("/offer")
-async def get_offer():
-    if SIGNALING_STATE["offer"]:
-        return JSONResponse(content=SIGNALING_STATE["offer"])
-    return JSONResponse(content={"status": "pending"}, status_code=404)
+@socketio.on('disconnect')
+def handle_disconnect():
+    print(f'Cliente desconectado: {request.sid}')
+    # Limpiar sesiones cuando un cliente se desconecta
+    for session_id, data in sessions.items():
+        if data['client_id'] == request.sid:
+            del sessions[session_id]
+            break
 
-# Cuando el navegador envía la respuesta
-@app.post("/answer")
-async def post_answer(request: Request):
-    data = await request.json()
-    SIGNALING_STATE["answer"] = data
-    return {"status": "ok"}
+@socketio.on('offer')
+def handle_offer(data):
+    """Recibir offer del Raspberry Pi y almacenarlo"""
+    session_id = data.get('session_id')
+    sessions[session_id] = {
+        'offer': data['offer'],
+        'client_id': request.sid,
+        'pi_connected': True
+    }
+    print(f"Offer recibido para sesión: {session_id}")
 
-# Cuando la Pi hace polling para obtener la respuesta
-@app.get("/answer")
-async def get_answer():
-    if SIGNALING_STATE["answer"]:
-        return JSONResponse(content=SIGNALING_STATE["answer"])
-    return JSONResponse(content={"status": "pending"}, status_code=404)
+@socketio.on('get_offer')
+def handle_get_offer(data):
+    """Enviar offer al cliente web cuando lo solicite"""
+    session_id = data.get('session_id')
+    if session_id in sessions:
+        socketio.emit('offer', {
+            'offer': sessions[session_id]['offer'],
+            'session_id': session_id
+        }, room=request.sid)
+    else:
+        socketio.emit('error', {'message': 'Sesión no encontrada'}, room=request.sid)
+
+@socketio.on('answer')
+def handle_answer(data):
+    """Recibir answer del cliente web y enviarlo al Raspberry Pi"""
+    session_id = data.get('session_id')
+    if session_id in sessions:
+        # Enviar answer al Raspberry Pi
+        socketio.emit('answer', {
+            'answer': data['answer'],
+            'session_id': session_id
+        }, room=sessions[session_id]['client_id'])
+
+@socketio.on('ice_candidate')
+def handle_ice_candidate(data):
+    """Retransmitir ICE candidates entre clientes"""
+    session_id = data.get('session_id')
+    if session_id in sessions:
+        # Enviar al otro cliente
+        target_client = sessions[session_id]['client_id'] if request.sid != sessions[session_id]['client_id'] else None
+        if target_client:
+            socketio.emit('ice_candidate', {
+                'candidate': data['candidate'],
+                'session_id': session_id
+            }, room=target_client)
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    socketio.run(app, host='0.0.0.0', port=port, debug=True)
