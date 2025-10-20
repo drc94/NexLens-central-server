@@ -1,31 +1,49 @@
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
-offer_sdp = None
-answer_sdp = None
+# Permitir cualquier origen para desarrollo
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
+# Estado global de señalización
+SIGNALING_STATE = {
+    "offer": None,
+    "answer": None
+}
+
+# Cuando la Pi envía la oferta
 @app.post("/offer")
 async def post_offer(request: Request):
-    global offer_sdp
-    offer_sdp = await request.json()
-    return PlainTextResponse("Offer received")
+    data = await request.json()
+    # Limpiar la respuesta anterior
+    SIGNALING_STATE["answer"] = None
+    SIGNALING_STATE["offer"] = data
+    return {"status": "ok"}
 
+# Cuando el navegador obtiene la oferta
 @app.get("/offer")
 async def get_offer():
-    if offer_sdp is None:
-        return PlainTextResponse("No offer yet", status_code=404)
-    return JSONResponse(offer_sdp)
+    if SIGNALING_STATE["offer"]:
+        return JSONResponse(content=SIGNALING_STATE["offer"])
+    return JSONResponse(content={"status": "pending"}, status_code=404)
 
+# Cuando el navegador envía la respuesta
 @app.post("/answer")
 async def post_answer(request: Request):
-    global answer_sdp
-    answer_sdp = await request.json()
-    return PlainTextResponse("Answer received")
+    data = await request.json()
+    SIGNALING_STATE["answer"] = data
+    return {"status": "ok"}
 
+# Cuando la Pi hace polling para obtener la respuesta
 @app.get("/answer")
 async def get_answer():
-    if answer_sdp is None:
-        return PlainTextResponse("No answer yet", status_code=404)
-    return JSONResponse(answer_sdp)
+    if SIGNALING_STATE["answer"]:
+        return JSONResponse(content=SIGNALING_STATE["answer"])
+    return JSONResponse(content={"status": "pending"}, status_code=404)
