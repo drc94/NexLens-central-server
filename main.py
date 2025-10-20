@@ -1,11 +1,12 @@
 from flask import Flask, request
 from flask_socketio import SocketIO
-import logging
 import os
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'webrtc_secret_key_2024')
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
+
+# Usar gevent en lugar de eventlet
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent')
 
 # Almacén para sesiones P2P
 sessions = {}
@@ -96,7 +97,6 @@ def handle_ice_candidate(data):
                 'candidate': data['candidate'],
                 'session_id': session_id
             }, room=sender_client)
-        print(f"❄️ ICE candidate retransmitido - Sesión: {session_id}")
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
