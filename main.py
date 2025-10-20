@@ -1,47 +1,37 @@
-from fastapi import FastAPI, WebSocket
-from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
+from aiohttp import web
+import json
 
-app = FastAPI()
+offer_sdp = None
+answer_sdp = None
 
-# Permitir conexiones desde cualquier origen (para navegador local)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+routes = web.RouteTableDef()
 
-# Guardar la última conexión (muy simple)
-pi_ws = None
+@routes.post("/offer")
+async def offer(request):
+    global offer_sdp
+    offer_sdp = await request.json()
+    return web.Response(text="Offer received")
 
-@app.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket):
-    global pi_ws
-    await ws.accept()
+@routes.get("/offer")
+async def get_offer(request):
+    if offer_sdp is None:
+        return web.Response(status=404, text="No offer yet")
+    return web.json_response(offer_sdp)
 
-    if pi_ws is None:
-        print("📷 Raspberry conectada")
-        pi_ws = ws
-        await ws.send_text('{"role":"pi"}')
-        try:
-            while True:
-                msg = await ws.receive_text()
-                if msg == "ping":
-                    await ws.send_text("pong")
-        except:
-            pi_ws = None
-    else:
-        print("🖥️ Navegador conectado")
-        try:
-            await ws.send_text('{"role":"browser"}')
-            offer = await ws.receive_text()
-            await pi_ws.send_text(offer)
-            answer = await pi_ws.receive_text()
-            await ws.send_text(answer)
-        except:
-            pass
+@routes.post("/answer")
+async def answer(request):
+    global answer_sdp
+    answer_sdp = await request.json()
+    return web.Response(text="Answer received")
+
+@routes.get("/answer")
+async def get_answer(request):
+    if answer_sdp is None:
+        return web.Response(status=404, text="No answer yet")
+    return web.json_response(answer_sdp)
+
+app = web.Application()
+app.add_routes(routes)
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=10000)
+    web.run_app(app, port=8080)
