@@ -1,37 +1,31 @@
-from aiohttp import web
-import json
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, PlainTextResponse
+
+app = FastAPI()
 
 offer_sdp = None
 answer_sdp = None
 
-routes = web.RouteTableDef()
-
-@routes.post("/offer")
-async def offer(request):
+@app.post("/offer")
+async def post_offer(request: Request):
     global offer_sdp
     offer_sdp = await request.json()
-    return web.Response(text="Offer received")
+    return PlainTextResponse("Offer received")
 
-@routes.get("/offer")
-async def get_offer(request):
+@app.get("/offer")
+async def get_offer():
     if offer_sdp is None:
-        return web.Response(status=404, text="No offer yet")
-    return web.json_response(offer_sdp)
+        return PlainTextResponse("No offer yet", status_code=404)
+    return JSONResponse(offer_sdp)
 
-@routes.post("/answer")
-async def answer(request):
+@app.post("/answer")
+async def post_answer(request: Request):
     global answer_sdp
     answer_sdp = await request.json()
-    return web.Response(text="Answer received")
+    return PlainTextResponse("Answer received")
 
-@routes.get("/answer")
-async def get_answer(request):
+@app.get("/answer")
+async def get_answer():
     if answer_sdp is None:
-        return web.Response(status=404, text="No answer yet")
-    return web.json_response(answer_sdp)
-
-app = web.Application()
-app.add_routes(routes)
-
-if __name__ == "__main__":
-    web.run_app(app, port=8080)
+        return PlainTextResponse("No answer yet", status_code=404)
+    return JSONResponse(answer_sdp)
